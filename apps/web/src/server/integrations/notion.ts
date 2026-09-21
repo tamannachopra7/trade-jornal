@@ -69,7 +69,7 @@ export async function syncTradeToNotion(trade: AnnotatedTrade, baseUrl?: string)
     if (existing.results.length > 0) {
       // Update existing
       await notion.pages.update({
-        page_id: existing.results[0].id,
+        page_id: existing.results[0]!.id,
         properties,
       });
     } else {
