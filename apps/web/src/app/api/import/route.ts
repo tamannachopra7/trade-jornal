@@ -38,7 +38,7 @@ export const POST = handler(async (request: Request) => {
     ? parseWithMapping(body.content, body.mapping, { timeZone })
     : parseAuto(body.content, { timeZone, fileName: body.fileName, symbol: body.symbol });
 
-  if (!parsed) {
+  if (!parsed || (parsed.executions.length === 0 && !body.mapping)) {
     return ok({
       detected: null,
       timeZone,
