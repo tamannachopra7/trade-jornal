@@ -128,3 +128,31 @@ export const getAiSettings = async (): Promise<AiSettingsPayload> => {
     aiConnections,
   };
 };
+
+export interface NotionSettings {
+  secret: string | null;
+  databaseId: string | null;
+}
+
+export const getNotionSettings = async (): Promise<NotionSettings> => {
+  const secretEnv = await getSetting("notionSecretEnc");
+  const databaseId = await getSetting("notionDatabaseId");
+  let secret = null;
+  if (secretEnv) {
+    try {
+      const key = decryptJson<unknown>(secretEnv);
+      secret = typeof key === "string" ? key.trim() || null : null;
+    } catch {
+      // Ignore
+    }
+  }
+  return { secret, databaseId: databaseId?.trim() || null };
+};
+
+export const setNotionSettings = async (secret: string | null, databaseId: string | null): Promise<void> => {
+  if (secret === null) await deleteSetting("notionSecretEnc");
+  else await setSetting("notionSecretEnc", encryptJson(secret.trim()));
+
+  if (databaseId === null) await deleteSetting("notionDatabaseId");
+  else await setSetting("notionDatabaseId", databaseId.trim());
+};

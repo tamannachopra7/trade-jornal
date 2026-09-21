@@ -33,6 +33,7 @@ import {
 import { RichEditor, type RichEditorHandle } from "@/components/rich-editor";
 import { Attachments } from "@/components/attachments";
 import { ReviewExport } from "@/components/review-export";
+import { SyncNotion } from "@/components/sync-notion";
 import { RuleChecklist } from "@/components/rule-checklist";
 import { useAutosave } from "@/lib/use-autosave";
 import { postJson, useApi } from "@/lib/use-api";
@@ -483,22 +484,25 @@ function AnnotationsCard({
               Save now
             </Button>
           </div>
-          <ReviewExport
-            containsFinancialData
-            document={{
-              title: `${trade.symbol} · ${trade.direction} review`,
-              subtitle: `${trade.openedAt} · ${trade.currency}`,
-              lines: [
-                `Status: ${trade.status} | Quantity: ${trade.quantity}`,
-                `Entry: ${trade.avgEntry} | Exit: ${trade.avgExit ?? "Open"}`,
-                `Net P&L: ${trade.netPnl.toFixed(2)} | Fees: ${trade.fees.toFixed(2)}`,
-                `Stop: ${stopLoss || "Unspecified"} | Target: ${profitTarget || "Unspecified"}`,
-                `Tags: ${tags || "None"} | Mistakes: ${mistakes || "None"}`,
-                "",
-                notes,
-              ],
-            }}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <ReviewExport
+              containsFinancialData
+              document={{
+                title: `${trade.symbol} · ${trade.direction} review`,
+                subtitle: `${trade.openedAt} · ${trade.currency}`,
+                lines: [
+                  `Status: ${trade.status} | Quantity: ${trade.quantity}`,
+                  `Entry: ${trade.avgEntry} | Exit: ${trade.avgExit ?? "Open"}`,
+                  `Net P&L: ${trade.netPnl.toFixed(2)} | Fees: ${trade.fees.toFixed(2)}`,
+                  `Stop: ${stopLoss || "Unspecified"} | Target: ${profitTarget || "Unspecified"}`,
+                  `Tags: ${tags || "None"} | Mistakes: ${mistakes || "None"}`,
+                  "",
+                  notes,
+                ],
+              }}
+            />
+            <SyncNotion tradeKey={trade.key} />
+          </div>
           <Attachments type="trade" id={trade.key} />
         </div>
       </CardContent>

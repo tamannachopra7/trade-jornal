@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { JournalDefaultSettings } from "@/components/journal-default-settings";
 import { MarketDataSettings } from "@/components/market-data-settings";
 import { AiSettings } from "@/components/ai-settings";
+import { NotionSettings } from "@/components/notion-settings";
 import { Download } from "lucide-react";
 import { FilterBar } from "@/components/filter-bar";
 import { Button } from "@/components/ui/button";
@@ -148,7 +149,7 @@ function Settings() {
         </Card>
 
         <AiSettings />
-
+        <NotionSettings />
         <Card>
           <CardHeader>
             <CardTitle>Your data</CardTitle>
