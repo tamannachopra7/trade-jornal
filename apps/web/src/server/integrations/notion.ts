@@ -1,8 +1,8 @@
 import { Client } from "@notionhq/client";
 import { getNotionSettings } from "@/server/settings";
-import type { Trade } from "@luxalgo/journal-core";
+import type { AnnotatedTrade } from "@luxalgo/journal-core";
 
-export async function syncTradeToNotion(trade: Trade, baseUrl?: string) {
+export async function syncTradeToNotion(trade: AnnotatedTrade, baseUrl?: string) {
   const { secret, databaseId } = await getNotionSettings();
   if (!secret || !databaseId) return;
 

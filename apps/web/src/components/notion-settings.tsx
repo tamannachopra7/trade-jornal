@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -71,10 +71,10 @@ export function NotionSettings() {
             </div>
           )}
         </div>
-        <CardDescription>
+        <p className="text-sm text-muted-foreground mt-2">
           Sync your trades to a Notion database for custom dashboards and note-taking.
           Follow the <a href="https://developers.notion.com/docs/create-a-notion-integration" target="_blank" rel="noreferrer" className="underline hover:text-foreground">Notion guide</a> to create an Internal Integration. Don't forget to share your database with the integration!
-        </CardDescription>
+        </p>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-1">

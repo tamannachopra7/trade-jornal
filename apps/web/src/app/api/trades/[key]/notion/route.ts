@@ -1,11 +1,18 @@
-import { bad, handler, notFound, ok } from "@/server/api";
-import { getTrade } from "@/server/trades-query";
+import { bad, handler, ok } from "@/server/api";
+import { getTradeByKey, rowToTrade } from "@/server/trades-query";
 import { syncTradeToNotion } from "@/server/integrations/notion";
+import { getMultipliers, getJournalDefaults } from "@/server/settings";
 
-export const POST = handler(async (request: Request, context: { params: { key: string } }) => {
-  const { key } = await context.params;
-  const trade = await getTrade(key);
-  if (!trade) return notFound();
+type Params = { params: Promise<{ key: string }> };
+
+export const POST = handler(async (request: Request, { params }: Params) => {
+  const { key } = await params;
+  const row = await getTradeByKey(key);
+  if (!row) return bad("Trade not found", 404);
+
+  const multipliers = await getMultipliers();
+  const defaults = await getJournalDefaults();
+  const trade = rowToTrade(row, { multipliers, defaults });
 
   // Determine base URL for deep linking
   const url = new URL(request.url);
