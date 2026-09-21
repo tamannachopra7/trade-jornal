@@ -1,22 +1,32 @@
 import { readFilters } from "@luxalgo/journal-core";
-import { desc } from "drizzle-orm";
 import { dailyStats } from "@luxalgo/journal-core";
-import { db, journalDays } from "@/db";
 import { handler, ok } from "@/server/api";
 import { getTimeZone } from "@/server/settings";
 import { queryTrades } from "@/server/trades-query";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
 
-/**
- * The journal chronology: every day that has trades OR a note, newest first.
- * Days with notes but no trades exist (planning days, review days).
- */
+const DATABASE_ID = 'trade_journal';
+
 export const GET = handler(async (request: Request) => {
   const url = new URL(request.url);
-  const timeZone = getTimeZone();
-  const { trades } = queryTrades(readFilters(url.searchParams));
+  const timeZone = await getTimeZone();
+  const { trades } = await queryTrades(readFilters(url.searchParams));
 
   const tradeDays = new Map(dailyStats(trades, timeZone).map((day) => [day.date, day]));
-  const noteRows = db.select().from(journalDays).orderBy(desc(journalDays.date)).all();
+  
+  const { databases } = createAdminClient();
+  let noteRows: any[] = [];
+  try {
+    const response = await databases.listDocuments(DATABASE_ID, 'journalDays', [
+      Query.orderDesc('date'),
+      Query.limit(5000)
+    ]);
+    noteRows = response.documents;
+  } catch {
+    // journalDays collection might not exist yet
+  }
+  
   const noteDays = new Map(noteRows.map((row) => [row.date, row]));
 
   const filters = readFilters(url.searchParams);
@@ -26,6 +36,7 @@ export const GET = handler(async (request: Request) => {
     )
     .sort()
     .reverse();
+    
   return ok({
     days: allDates.map((date) => ({
       date,

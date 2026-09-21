@@ -1,7 +1,9 @@
-import { asc, desc, eq } from "drizzle-orm";
-import { db, folders, notes } from "@/db";
 import { bad, handler, ok } from "@/server/api";
 import { newId, nowIso } from "@/server/ids";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
 
 export const GET = handler(async (request: Request) => {
   const url = new URL(request.url);
@@ -9,11 +11,16 @@ export const GET = handler(async (request: Request) => {
   const search = url.searchParams.get("q")?.toLowerCase();
   const tag = url.searchParams.get("tag");
   const sort = url.searchParams.get("sort") ?? "updated";
-
-  let rows =
-    folderId && folderId !== "all"
-      ? db.select().from(notes).where(eq(notes.folderId, folderId)).all()
-      : db.select().from(notes).all();
+  
+  const { databases } = createAdminClient();
+  
+  let queries = [Query.limit(5000)];
+  if (folderId && folderId !== "all") {
+    queries.push(Query.equal('folderId', folderId));
+  }
+  
+  const notesRes = await databases.listDocuments(DATABASE_ID, 'notes', queries);
+  let rows = notesRes.documents as any[];
 
   if (search) {
     rows = rows.filter(
@@ -38,8 +45,8 @@ export const GET = handler(async (request: Request) => {
         : b.updatedAt.localeCompare(a.updatedAt),
   );
 
-  const folderRows = db.select().from(folders).orderBy(asc(folders.createdAt)).all();
-  return ok({ notes: rows, folders: folderRows });
+  const folderRes = await databases.listDocuments(DATABASE_ID, 'folders', [Query.limit(5000), Query.orderAsc('createdAt')]);
+  return ok({ notes: rows, folders: folderRes.documents });
 });
 
 interface CreateNoteBody {
@@ -55,18 +62,17 @@ export const POST = handler(async (request: Request) => {
   const body = (await request.json()) as CreateNoteBody;
   const id = newId();
   const now = nowIso();
-  db.insert(notes)
-    .values({
-      id,
-      folderId: body.folderId ?? "my-notes",
-      title: body.title ?? "",
-      content: body.content ?? "",
-      tagsJson: body.tags ? JSON.stringify(body.tags) : null,
-      tradeKey: body.tradeKey ?? null,
-      dayDate: body.dayDate ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .run();
+  const { databases } = createAdminClient();
+  
+  await databases.createDocument(DATABASE_ID, 'notes', id, {
+    folderId: body.folderId ?? "my-notes",
+    title: body.title ?? "",
+    content: body.content ?? "",
+    tagsJson: body.tags ? JSON.stringify(body.tags) : null,
+    tradeKey: body.tradeKey ?? null,
+    dayDate: body.dayDate ?? null,
+    createdAt: now,
+    updatedAt: now,
+  });
   return ok({ id });
 });

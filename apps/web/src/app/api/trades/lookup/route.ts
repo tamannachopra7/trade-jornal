@@ -1,25 +1,31 @@
-import { db } from "@/db";
 import { handler, ok } from "@/server/api";
 import type { LinkableTrade } from "@/lib/trade-links";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
 
-/** Stop after 51 matches; retain Unicode-aware searching without loading the entire history. */
-export const GET = handler((request: Request) => {
+const DATABASE_ID = 'trade_journal';
+
+export const GET = handler(async (request: Request) => {
   const search = new URL(request.url).searchParams.get("q")?.trim().toLowerCase() ?? "";
-  const candidates = db.$client
-    .prepare(
-      `
-    SELECT t.key, t.symbol, t.direction, t.opened_at AS openedAt,
-      COALESCE(a.name, 'Unknown account') AS accountName
-    FROM trades t LEFT JOIN accounts a ON a.id = t.account_id
-    ORDER BY t.opened_at DESC
-  `,
-    )
-    .iterate() as IterableIterator<LinkableTrade>;
+  const { databases } = createAdminClient();
+  
+  const tradesRes = await databases.listDocuments(DATABASE_ID, 'trades', [Query.limit(5000), Query.orderDesc('openedAt')]);
+  const accRes = await databases.listDocuments(DATABASE_ID, 'accounts', [Query.limit(5000)]);
+  const accounts = new Map(accRes.documents.map(a => [a.$id, a.name]));
+
   const matches: LinkableTrade[] = [];
-  for (const trade of candidates) {
-    if (!`${trade.symbol} ${trade.openedAt} ${trade.accountName}`.toLowerCase().includes(search))
+  for (const trade of tradesRes.documents) {
+    const accountName = accounts.get(trade.accountId) ?? 'Unknown account';
+    if (!`${trade.symbol} ${trade.openedAt} ${accountName}`.toLowerCase().includes(search)) {
       continue;
-    matches.push(trade);
+    }
+    matches.push({
+      key: trade.$id,
+      symbol: trade.symbol,
+      direction: trade.direction,
+      openedAt: trade.openedAt,
+      accountName
+    });
     if (matches.length === 51) break;
   }
   return ok({ trades: matches.slice(0, 50), hasMore: matches.length > 50 });

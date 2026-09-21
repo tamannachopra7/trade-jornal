@@ -24,16 +24,12 @@ const bucketBlock = (title: string, buckets: BucketStats[]): string =>
         )
         .join("\n")}\n`;
 
-/**
- * "Ask your journal" — natural-language questions answered from the trader's
- * own aggregates. The same questions an agent can ask through the MCP tools.
- */
 export const POST = handler(async (request: Request) => {
   const { question } = (await request.json()) as { question?: string };
   if (!question) return bad("question is required");
-  const timeZone = getTimeZone();
+  const timeZone = await getTimeZone();
 
-  const { trades } = queryTrades();
+  const { trades } = await queryTrades();
   if (trades.length === 0) return bad("The journal is empty — import trades first");
   const m = computeMetrics(trades, { timeZone });
 

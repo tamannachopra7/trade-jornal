@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
 import { parseCsv } from "@luxalgo/journal-importers";
-import { db, propEntries, propAudit } from "@/db";
 import { mutateProp } from "./prop-firms";
 import { requireValue, RequestError } from "./api";
 import { newId, nowIso } from "./ids";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
+
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 class PreviewRollback extends Error {
   constructor(public result: ImportResult) {
@@ -13,7 +16,7 @@ class PreviewRollback extends Error {
 }
 type ImportResult = { imported: number; skipped: number; sample: Record<string, string>[] };
 /** Deliberately a generic settled-cash format; bank/firm CSVs need explicit mapping. */
-export function importPropCsv(content: string, preview: boolean): ImportResult {
+export async function importPropCsv(content: string, preview: boolean): Promise<ImportResult> {
   requireValue(Buffer.byteLength(content) <= 2 * 1024 * 1024, "CSV must be 2 MB or smaller.");
   requireValue(
     (content.match(/"/g)?.length ?? 0) % 2 === 0,
@@ -56,97 +59,103 @@ export function importPropCsv(content: string, preview: boolean): ImportResult {
     );
     seen.add(row.id!);
   }
+  
+  const { databases } = createAdminClient();
+  let imported = 0,
+    skipped = 0;
+    
   try {
-    return db.transaction(() => {
-      let imported = 0,
-        skipped = 0;
-      for (const [index, row] of records.entries()) {
+    for (const [index, row] of records.entries()) {
+      try {
+        requireValue(
+          ["expense", "refund", "payout"].includes(row.kind!),
+          "Kind must be expense, refund or payout (actual cash received).",
+        );
+        const id = `csv-${hash(row.id!)}`.substring(0, 36);
+        const fingerprint = `CSV import ${hash(JSON.stringify(row))}`;
+        
+        let old;
         try {
+          old = await databases.getDocument(DATABASE_ID, 'propEntries', id);
+        } catch {}
+        
+        if (old) {
+          const auditRes = await databases.listDocuments(DATABASE_ID, 'propAudit', [
+            Query.equal('entityId', id),
+            Query.equal('reason', fingerprint),
+            Query.limit(1)
+          ]);
           requireValue(
-            ["expense", "refund", "payout"].includes(row.kind!),
-            "Kind must be expense, refund or payout (actual cash received).",
+            auditRes.documents.length > 0,
+            "This CSV ID was already imported with different data. Edit the existing record or use a new ID for a separate transaction.",
           );
-          const id = `csv-${hash(row.id!)}`,
-            fingerprint = `CSV import ${hash(JSON.stringify(row))}`;
-          const old = db.select().from(propEntries).where(eq(propEntries.id, id)).get();
-          if (old) {
-            requireValue(
-              db
-                .select({ id: propAudit.id })
-                .from(propAudit)
-                .where(and(eq(propAudit.entityId, id), eq(propAudit.reason, fingerprint)))
-                .get(),
-              "This CSV ID was already imported with different data. Edit the existing record or use a new ID for a separate transaction.",
-            );
-            skipped++;
-            continue;
-          }
-          const command = {
-            action: "entry.save",
-            id,
-            revision: 0,
-            kind: row.kind,
-            accountId: row.account_id,
-            firm: row.firm,
-            currency: row.currency,
-            occurredOn: row.date,
+          skipped++;
+          continue;
+        }
+        
+        let parentId = null;
+        if (row.expense_id) {
+          let p;
+          try {
+            p = await databases.getDocument(DATABASE_ID, 'propEntries', row.expense_id);
+          } catch {}
+          parentId = p ? row.expense_id : `csv-${hash(row.expense_id)}`.substring(0, 36);
+        }
+
+        const command = {
+          action: "entry.save" as const,
+          id,
+          revision: 0,
+          kind: row.kind as "expense" | "refund" | "payout",
+          accountId: row.account_id,
+          firm: row.firm,
+          currency: row.currency,
+          occurredOn: row.date,
+          amount: row.amount,
+          category: row.category,
+          parentId,
+          reference: row.reference,
+          notes: row.notes,
+          splitPercent: "100",
+          fee: "0",
+          status: "requested" as const,
+        };
+        await mutateProp(command);
+        if (row.kind === "payout") {
+          await mutateProp({
+            action: "receipt.add",
+            id: `${id}-cash`,
+            payoutId: id,
+            revision: 1,
+            kind: "receipt",
             amount: row.amount,
-            category: row.category,
-            parentId: row.expense_id
-              ? db
-                  .select({ id: propEntries.id })
-                  .from(propEntries)
-                  .where(eq(propEntries.id, row.expense_id))
-                  .get()
-                ? row.expense_id
-                : `csv-${hash(row.expense_id)}`
-              : null,
+            occurredOn: row.date,
             reference: row.reference,
             notes: row.notes,
-            splitPercent: "100",
-            fee: "0",
-            status: "requested",
-          };
-          mutateProp(command);
-          if (row.kind === "payout") {
-            mutateProp({
-              action: "receipt.add",
-              id: `${id}-cash`,
-              payoutId: id,
-              revision: 1,
-              kind: "receipt",
-              amount: row.amount,
-              occurredOn: row.date,
-              reference: row.reference,
-              notes: row.notes,
-            });
-            mutateProp({
-              ...command,
-              revision: 2,
-              status: "completed",
-              reason: "Imported settled payout",
-            });
-          }
-          db.insert(propAudit)
-            .values({
-              id: newId(),
-              entityType: "entry",
-              entityId: id,
-              beforeJson: null,
-              afterJson: JSON.stringify(row),
-              reason: fingerprint,
-              createdAt: nowIso(),
-            })
-            .run();
-          imported++;
-        } catch (error) {
-          throw new RequestError(`Row ${index + 2}: ${(error as Error).message}`);
+          });
+          await mutateProp({
+            ...command,
+            revision: 2,
+            status: "completed",
+            reason: "Imported settled payout",
+          });
         }
+        await databases.createDocument(DATABASE_ID, 'propAudit', newId(), {
+          entityType: "entry",
+          entityId: id,
+          beforeJson: null,
+          afterJson: JSON.stringify(row),
+          reason: fingerprint,
+          createdAt: nowIso(),
+        });
+        imported++;
+      } catch (error) {
+        throw new RequestError(`Row ${index + 2}: ${(error as Error).message}`);
       }
-      const result = { imported, skipped, sample: records.slice(0, 5) };
-      if (preview) throw new PreviewRollback(result);
-      return result;
-    });
+    }
+    const result = { imported, skipped, sample: records.slice(0, 5) };
+    if (preview) throw new PreviewRollback(result);
+    return result;
   } catch (error) {
     if (error instanceof PreviewRollback) return error.result;
     throw error;

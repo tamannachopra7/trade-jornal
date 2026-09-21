@@ -1,32 +1,44 @@
-import { asc, eq } from "drizzle-orm";
-import { accounts, db } from "@/db";
 import { bad, handler, ok } from "@/server/api";
 import { encryptJson } from "@/server/crypto";
 import { newId, nowIso } from "@/server/ids";
 import { syncAccount } from "@/server/sync";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
 
-export const GET = handler((request: Request) => {
-  if (new URL(request.url).searchParams.get("summary") === "1") {
+const DATABASE_ID = 'trade_journal';
+const COLLECTION_ID = 'accounts';
+
+export const GET = handler(async (request: Request) => {
+  const { databases } = createAdminClient();
+  const summary = new URL(request.url).searchParams.get("summary") === "1";
+  
+  const response = await databases.listDocuments(
+    DATABASE_ID,
+    COLLECTION_ID,
+    [Query.orderAsc("createdAt")]
+  );
+  
+  if (summary) {
     return ok({
-      accounts: db
-        .select({
-          id: accounts.id,
-          name: accounts.name,
-          broker: accounts.broker,
-          archivedAt: accounts.archivedAt,
-        })
-        .from(accounts)
-        .orderBy(asc(accounts.createdAt))
-        .all(),
+      accounts: response.documents.map(doc => ({
+        id: doc.$id,
+        name: doc.name,
+        broker: doc.broker,
+        archivedAt: doc.archivedAt,
+      }))
     });
   }
-  const rows = db.select().from(accounts).orderBy(asc(accounts.createdAt)).all();
+
   return ok({
-    accounts: rows.map(({ credentialsEnc, ...safe }) => ({
-      ...safe,
-      connected: credentialsEnc !== null,
-      snapshot: safe.snapshotJson ? JSON.parse(safe.snapshotJson) : null,
-    })),
+    accounts: response.documents.map(doc => {
+      const { credentialsEnc, $id, ...safe } = doc;
+      return {
+        ...safe,
+        id: $id,
+        connected: credentialsEnc !== null && credentialsEnc !== undefined && credentialsEnc !== "",
+        snapshot: doc.snapshotJson ? JSON.parse(doc.snapshotJson) : null,
+      };
+    })
   });
 });
 
@@ -48,30 +60,38 @@ export const POST = handler(async (request: Request) => {
     return bad("sync accounts need a broker and credentials");
   }
 
+  const { databases } = createAdminClient();
   const id = newId();
-  db.insert(accounts)
-    .values({
-      id,
-      name: body.name,
-      broker: body.broker ?? "",
-      kind: body.kind,
-      currency: body.currency ?? "USD",
-      initialBalance: body.initialBalance ?? 0,
-      profitCalcMethod: body.profitCalcMethod ?? "fifo",
-      credentialsEnc: body.kind === "sync" ? encryptJson(body.credentials) : null,
-      autoSync: body.autoSync ?? body.kind === "sync",
-      createdAt: nowIso(),
-    })
-    .run();
 
-  // First sync happens right away so the account isn't born empty.
+  const data: any = {
+    name: body.name,
+    broker: body.broker ?? "",
+    kind: body.kind,
+    currency: body.currency ?? "USD",
+    initialBalance: body.initialBalance ?? 0,
+    profitCalcMethod: body.profitCalcMethod ?? "fifo",
+    autoSync: body.autoSync ?? body.kind === "sync",
+    createdAt: nowIso(),
+  };
+
+  if (body.kind === "sync") {
+    data.credentialsEnc = encryptJson(body.credentials);
+  }
+
+  try {
+    await databases.createDocument(DATABASE_ID, COLLECTION_ID, id, data);
+  } catch (err: any) {
+    return bad("Failed to create account: " + err.message);
+  }
+
   let sync = null;
   if (body.kind === "sync") {
     try {
+      // NOTE: syncAccount will also need to be rewritten to use Appwrite!
       sync = await syncAccount(id);
     } catch (error) {
       // Bad credentials shouldn't strand a half-created account.
-      db.delete(accounts).where(eq(accounts.id, id)).run();
+      await databases.deleteDocument(DATABASE_ID, COLLECTION_ID, id);
       return bad(error instanceof Error ? error.message : "Broker connection failed", 502);
     }
   }

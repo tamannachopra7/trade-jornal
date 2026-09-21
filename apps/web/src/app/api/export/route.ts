@@ -1,23 +1,3 @@
-import {
-  db,
-  accounts,
-  executions,
-  journalDays,
-  notes,
-  playbooks,
-  trades,
-  attachments,
-  noteTemplates,
-  tradeRuleChecks,
-  progressRules,
-  progressChecks,
-  missedTrades,
-  folders,
-  propAccounts,
-  propEntries,
-  propReceipts,
-  propAudit,
-} from "@/db";
 import { readFilters } from "@luxalgo/journal-core";
 import { queryTrades } from "@/server/trades-query";
 import {
@@ -28,11 +8,11 @@ import {
 } from "@/server/settings";
 import { handler, ok } from "@/server/api";
 import { attachmentExportRecord, EXPORT_ATTACHMENTS_NOTE } from "@/lib/export-format";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
 
-/**
- * Full data export: your journal is yours. Credentials are deliberately
- * excluded: an export must be safe to share or move between machines.
- */
+const DATABASE_ID = 'trade_journal';
+
 export const GET = handler(async (request: Request) => {
   const url = new URL(request.url);
   const format = url.searchParams.get("format") ?? "json";
@@ -44,7 +24,8 @@ export const GET = handler(async (request: Request) => {
       const text = value === null || value === undefined ? "" : String(value);
       return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
     };
-    const lines = queryTrades(readFilters(url.searchParams)).rows.map((row) =>
+    const { rows } = await queryTrades(readFilters(url.searchParams));
+    const lines = rows.map((row) =>
       [
         row.key,
         row.accountId,
@@ -73,48 +54,63 @@ export const GET = handler(async (request: Request) => {
     });
   }
 
+  const { databases } = createAdminClient();
+  
+  const fetchAll = async (collectionId: string) => {
+    try {
+      const res = await databases.listDocuments(DATABASE_ID, collectionId, [Query.limit(5000)]);
+      return res.documents.map(d => {
+        const { $id, $createdAt, $updatedAt, $permissions, $databaseId, $collectionId, ...rest } = d;
+        return { id: $id, createdAt: $createdAt, updatedAt: $updatedAt, ...rest };
+      });
+    } catch {
+      return [];
+    }
+  };
+
+  const accounts = await fetchAll('accounts');
+  const executions = await fetchAll('executions');
+  const trades = await fetchAll('trades');
+  const journalDays = await fetchAll('journalDays');
+  const notes = await fetchAll('notes');
+  const folders = await fetchAll('folders');
+  const playbooks = await fetchAll('playbooks');
+  const noteTemplates = await fetchAll('noteTemplates');
+  const tradeRuleChecks = await fetchAll('tradeRuleChecks');
+  const progressRules = await fetchAll('progressRules');
+  const progressChecks = await fetchAll('progressChecks');
+  const missedTrades = await fetchAll('missedTrades');
+  const propAccounts = await fetchAll('propAccounts');
+  const propEntries = await fetchAll('propEntries');
+  const propReceipts = await fetchAll('propReceipts');
+  const propAudit = await fetchAll('propAudit');
+  const attachments = await fetchAll('attachments');
+
   return ok({
     exportedAt: new Date().toISOString(),
     note: EXPORT_ATTACHMENTS_NOTE,
-    accounts: db
-      .select()
-      .from(accounts)
-      .all()
-      .map(({ credentialsEnc: _omitted, ...safe }) => safe),
-    executions: db.select().from(executions).all(),
-    trades: db.select().from(trades).all(),
-    journalDays: db.select().from(journalDays).all(),
-    notes: db.select().from(notes).all(),
-    folders: db.select().from(folders).all(),
-    playbooks: db.select().from(playbooks).all(),
-    noteTemplates: db.select().from(noteTemplates).all(),
-    tradeRuleChecks: db.select().from(tradeRuleChecks).all(),
-    progressRules: db.select().from(progressRules).all(),
-    progressChecks: db.select().from(progressChecks).all(),
-    missedTrades: db.select().from(missedTrades).all(),
-    propAccounts: db.select().from(propAccounts).all(),
-    propEntries: db.select().from(propEntries).all(),
-    propReceipts: db.select().from(propReceipts).all(),
-    propAudit: db.select().from(propAudit).all(),
-    journalDefaults: getJournalDefaults(),
+    accounts: accounts.map(({ credentialsEnc: _omitted, ...safe }: any) => safe),
+    executions,
+    trades,
+    journalDays,
+    notes,
+    folders,
+    playbooks,
+    noteTemplates,
+    tradeRuleChecks,
+    progressRules,
+    progressChecks,
+    missedTrades,
+    propAccounts,
+    propEntries,
+    propReceipts,
+    propAudit,
+    journalDefaults: await getJournalDefaults(),
     settings: {
-      timeZone: getTimeZone(),
-      importTimeZone: getImportTimeZone(),
-      multipliers: getMultipliers(),
+      timeZone: await getTimeZone(),
+      importTimeZone: await getImportTimeZone(),
+      multipliers: await getMultipliers(),
     },
-    // Metadata only: attachment binaries stay in the data directory.
-    attachments: db
-      .select({
-        id: attachments.id,
-        ownerType: attachments.ownerType,
-        ownerId: attachments.ownerId,
-        name: attachments.name,
-        mime: attachments.mime,
-        size: attachments.size,
-        createdAt: attachments.createdAt,
-      })
-      .from(attachments)
-      .all()
-      .map(attachmentExportRecord),
+    attachments: attachments.map((a: any) => attachmentExportRecord(a)),
   });
 });

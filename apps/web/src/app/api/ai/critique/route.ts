@@ -1,16 +1,16 @@
 import { bad, handler, ok } from "@/server/api";
 import { runAi } from "@/server/ai";
 import { listExecutions } from "@/server/executions";
-import { getTradeByKey, rowToTrade } from "@/server/trades-query";
+import { getTradeByKey, rowToTrade, getTradeContext } from "@/server/trades-query";
 
 /** Critique one trade: entries, exits, sizing, and the trader's own annotations. */
 export const POST = handler(async (request: Request) => {
   const { key } = (await request.json()) as { key?: string };
   if (!key) return bad("key is required");
-  const row = getTradeByKey(key);
+  const row = await getTradeByKey(key);
   if (!row) return bad("Trade not found", 404);
-  const trade = rowToTrade(row);
-  const fills = listExecutions(row.accountId, trade.executionIds).sort((a, b) =>
+  const trade = rowToTrade(row, await getTradeContext());
+  const fills = (await listExecutions(row.accountId, trade.executionIds)).sort((a, b) =>
     a.executedAt.localeCompare(b.executedAt),
   );
 

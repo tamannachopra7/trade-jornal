@@ -1,22 +1,36 @@
 import { tradeRisk, tradeR, plannedR } from "@luxalgo/journal-core";
-import { eq } from "drizzle-orm";
-import { db, trades, playbooks, accounts } from "@/db";
 import { bad, handler, ok, requireValue } from "@/server/api";
 import { deleteExecutionsForTrades, listExecutions } from "@/server/executions";
 import { nowIso } from "@/server/ids";
 import { getTradeByKey, rowToTrade } from "@/server/trades-query";
-import { getTimeZone } from "@/server/settings";
+import { getTimeZone, getMultipliers, getJournalDefaults } from "@/server/settings";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
 
 type Params = { params: Promise<{ key: string }> };
 
 export const GET = handler(async (_request: Request, { params }: Params) => {
   const { key } = await params;
-  const row = getTradeByKey(key);
+  const row = await getTradeByKey(key);
   if (!row) return bad("Trade not found", 404);
-  const trade = rowToTrade(row);
-  const fills = listExecutions(row.accountId, trade.executionIds);
+  const multipliers = await getMultipliers();
+  const defaults = await getJournalDefaults();
+  const trade = rowToTrade(row, { multipliers, defaults });
+  const fills = await listExecutions(row.accountId, trade.executionIds);
+  
+  const { databases } = createAdminClient();
+  let currency = "USD";
+  try {
+    const acc = await databases.getDocument(DATABASE_ID, 'accounts', row.accountId);
+    currency = acc.currency ?? "USD";
+  } catch {
+    // default USD
+  }
+  
   return ok({
-    timeZone: getTimeZone(),
+    timeZone: await getTimeZone(),
     trade: {
       ...row,
       status: trade.status,
@@ -24,12 +38,7 @@ export const GET = handler(async (_request: Request, { params }: Params) => {
       realizedR: tradeR(trade),
       plannedR: plannedR(trade),
       contractMultiplier: trade.contractMultiplier ?? null,
-      currency:
-        db
-          .select({ currency: accounts.currency })
-          .from(accounts)
-          .where(eq(accounts.id, row.accountId))
-          .get()?.currency ?? "USD",
+      currency,
     },
     executions: fills,
   });
@@ -49,7 +58,7 @@ interface AnnotateBody {
 export const PATCH = handler(async (request: Request, { params }: Params) => {
   const { key } = await params;
   const decoded = key;
-  const row = getTradeByKey(decoded);
+  const row = await getTradeByKey(decoded);
   if (!row) return bad("Trade not found", 404);
 
   const body = (await request.json()) as AnnotateBody;
@@ -74,11 +83,17 @@ export const PATCH = handler(async (request: Request, { params }: Params) => {
           body[field]!.every((s) => typeof s === "string" && s.length <= 200)),
       `Invalid ${field}.`,
     );
-  requireValue(
-    !body.playbookId || db.select().from(playbooks).where(eq(playbooks.id, body.playbookId)).get(),
-    "Playbook not found.",
-  );
-  const patch: Partial<typeof trades.$inferInsert> = {};
+    
+  const { databases } = createAdminClient();
+  if (body.playbookId) {
+    try {
+      await databases.getDocument(DATABASE_ID, 'playbooks', body.playbookId);
+    } catch {
+      requireValue(false, "Playbook not found.");
+    }
+  }
+  
+  const patch: any = {};
   if (body.notes !== undefined) patch.notes = body.notes;
   if (body.tags !== undefined) patch.tagsJson = JSON.stringify(body.tags);
   if (body.mistakes !== undefined) patch.mistakesJson = JSON.stringify(body.mistakes);
@@ -89,15 +104,14 @@ export const PATCH = handler(async (request: Request, { params }: Params) => {
   if (body.reviewed !== undefined) patch.reviewedAt = body.reviewed ? nowIso() : null;
 
   if (!Object.keys(patch).length) return ok({ updated: true });
-  db.update(trades).set(patch).where(eq(trades.key, decoded)).run();
+  await databases.updateDocument(DATABASE_ID, 'trades', decoded, patch);
   return ok({ updated: true });
 });
 
 export const DELETE = handler(async (_request: Request, { params }: Params) => {
   const { key } = await params;
-  const row = getTradeByKey(key);
+  const row = await getTradeByKey(key);
   if (!row) return bad("Trade not found", 404);
-  // Deleting a trade means deleting its executions; the rebuild removes the row.
-  deleteExecutionsForTrades(row.accountId, JSON.parse(row.executionIdsJson) as string[]);
+  await deleteExecutionsForTrades(row.accountId, JSON.parse(row.executionIdsJson) as string[]);
   return ok({ deleted: true });
 });

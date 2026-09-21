@@ -1,7 +1,10 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dataDir } from "@/db";
+
+export const dataDir = () => {
+  return process.env.DATA_DIR ?? join(process.cwd(), ".data");
+};
 
 /**
  * Broker credentials at rest are AES-256-GCM encrypted. The key comes from

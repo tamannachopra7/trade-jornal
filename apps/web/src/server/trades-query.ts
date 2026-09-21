@@ -1,11 +1,41 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
 import { matchesFilters, type AnalysisFilters, type AnnotatedTrade } from "@luxalgo/journal-core";
 import { getTimeZone, getMultipliers, getJournalDefaults } from "./settings";
-import { db, trades } from "@/db";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
 
 export type TradeFilters = AnalysisFilters & { accountIds?: string[] };
 
-export type TradeRow = typeof trades.$inferSelect;
+export type TradeRow = {
+  key: string;
+  accountId: string;
+  symbol: string;
+  assetClass: string | null;
+  direction: "long" | "short";
+  status: "open" | "win" | "loss" | "breakeven";
+  openedAt: string;
+  closedAt: string | null;
+  quantity: number;
+  openQuantity: number;
+  avgEntry: number;
+  avgExit: number | null;
+  grossPnl: number;
+  fees: number;
+  netPnl: number;
+  executionCount: number;
+  executionIdsJson: string;
+  exitsJson: string;
+  durationMs: number | null;
+  tagsJson: string | null;
+  mistakesJson: string | null;
+  playbookId: string | null;
+  rating: number | null;
+  stopLoss: number | null;
+  profitTarget: number | null;
+  reviewedAt: string | null;
+  notes?: string | null;
+};
 
 const parseJsonArray = (value: string | null): string[] => {
   if (!value) return [];
@@ -17,8 +47,9 @@ const parseJsonArray = (value: string | null): string[] => {
   }
 };
 
-const context = () => ({ multipliers: getMultipliers(), defaults: getJournalDefaults() });
-export const rowToTrade = (row: TradeRow, config = context()): AnnotatedTrade => {
+export const getTradeContext = async () => ({ multipliers: await getMultipliers(), defaults: await getJournalDefaults() });
+
+export const rowToTrade = (row: TradeRow, config: { multipliers: Record<string, number>, defaults: any }): AnnotatedTrade => {
   const multiplier = config.multipliers[row.symbol];
   const defaults = config.defaults;
   const missingMultiplier =
@@ -71,43 +102,58 @@ export const rowToTrade = (row: TradeRow, config = context()): AnnotatedTrade =>
   };
 };
 
-/**
- * Narrow indexed identity fields before decoding rows. The core predicate
- * remains authoritative for timezone, risk and breakeven semantics.
- */
-export const queryTrades = (
+export const queryTrades = async (
   filters: TradeFilters = {},
-): { rows: TradeRow[]; trades: AnnotatedTrade[] } => {
+): Promise<{ rows: TradeRow[]; trades: AnnotatedTrade[] }> => {
   const effective = { ...filters, accounts: filters.accounts ?? filters.accountIds?.join(",") };
   const accountIds = effective.accounts
     ?.split(",")
     .map((id) => id.trim())
     .filter(Boolean);
-  const all = db
-    .select()
-    .from(trades)
-    .where(
-      and(
-        accountIds?.length ? inArray(trades.accountId, accountIds) : undefined,
-        effective.playbookId ? eq(trades.playbookId, effective.playbookId) : undefined,
-        effective.direction
-          ? eq(trades.direction, effective.direction as "long" | "short")
-          : undefined,
-        effective.assetClass ? eq(trades.assetClass, effective.assetClass) : undefined,
-      ),
-    )
-    .orderBy(asc(trades.openedAt))
-    .all();
-  const timeZone = getTimeZone();
-  const config = context();
+
+  const { databases } = createAdminClient();
+  const queries = [];
+  
+  if (effective.playbookId) queries.push(Query.equal('playbookId', effective.playbookId));
+  if (effective.direction) queries.push(Query.equal('direction', effective.direction as string));
+  if (effective.assetClass) queries.push(Query.equal('assetClass', effective.assetClass));
+  // Appwrite limits: we can't easily do `inArray` if accountIds is large without multiple queries.
+  // For small lists, we can use Query.equal('accountId', accountIds) which acts as IN.
+  if (accountIds && accountIds.length > 0) {
+    queries.push(Query.equal('accountId', accountIds));
+  }
+  
+  // NOTE: This might need pagination for very large journals
+  queries.push(Query.limit(5000));
+  queries.push(Query.orderAsc('openedAt'));
+  
+  const response = await databases.listDocuments(DATABASE_ID, 'trades', queries);
+  const all = response.documents.map(doc => {
+    const { $id, ...rest } = doc;
+    return { ...rest, key: $id } as unknown as TradeRow;
+  });
+
+  const timeZone = await getTimeZone();
+  const config = await getTradeContext();
+  
   const pairs = all
     .map((row) => ({ row, trade: rowToTrade(row, config) }))
     .filter(({ trade }) => matchesFilters(trade, effective, timeZone));
+    
   return {
     rows: pairs.map(({ row, trade }) => ({ ...row, status: trade.status })),
     trades: pairs.map((p) => p.trade),
   };
 };
 
-export const getTradeByKey = (key: string): TradeRow | undefined =>
-  db.select().from(trades).where(eq(trades.key, key)).get();
+export const getTradeByKey = async (key: string): Promise<TradeRow | undefined> => {
+  const { databases } = createAdminClient();
+  try {
+    const doc = await databases.getDocument(DATABASE_ID, 'trades', key);
+    const { $id, ...rest } = doc;
+    return { ...rest, key: $id } as unknown as TradeRow;
+  } catch {
+    return undefined;
+  }
+};
+

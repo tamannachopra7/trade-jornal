@@ -1,8 +1,10 @@
-import { eq, inArray } from "drizzle-orm";
-import { db, trades } from "@/db";
 import { bad, handler, ok } from "@/server/api";
 import { deleteExecutionsForTrades } from "@/server/executions";
 import { nowIso } from "@/server/ids";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
 
 interface BulkBody {
   keys: string[];
@@ -14,15 +16,24 @@ interface BulkBody {
 export const POST = handler(async (request: Request) => {
   const body = (await request.json()) as BulkBody;
   if (!Array.isArray(body.keys) || body.keys.length === 0) return bad("keys are required");
-  const rows = db.select().from(trades).where(inArray(trades.key, body.keys)).all();
+  const { databases } = createAdminClient();
+  
+  // Appwrite doesn't have an "IN" operator that scales indefinitely, chunk queries if necessary.
+  // Actually Query.equal('key', [...]) might work if length < 100
+  let rows: any[] = [];
+  try {
+    const res = await databases.listDocuments(DATABASE_ID, 'trades', [Query.contains('$id', body.keys), Query.limit(5000)]);
+    rows = res.documents.filter(d => body.keys.includes(d.$id));
+  } catch {
+    return bad("Error fetching trades");
+  }
 
   switch (body.action) {
     case "review":
     case "unreview":
-      db.update(trades)
-        .set({ reviewedAt: body.action === "review" ? nowIso() : null })
-        .where(inArray(trades.key, body.keys))
-        .run();
+      for (const key of body.keys) {
+        await databases.updateDocument(DATABASE_ID, 'trades', key, { reviewedAt: body.action === "review" ? nowIso() : null });
+      }
       return ok({ updated: rows.length });
     case "tag":
     case "untag": {
@@ -31,18 +42,14 @@ export const POST = handler(async (request: Request) => {
         const tags = new Set<string>(row.tagsJson ? (JSON.parse(row.tagsJson) as string[]) : []);
         if (body.action === "tag") tags.add(body.tag);
         else tags.delete(body.tag);
-        db.update(trades)
-          .set({ tagsJson: JSON.stringify([...tags]) })
-          .where(eq(trades.key, row.key))
-          .run();
+        await databases.updateDocument(DATABASE_ID, 'trades', row.$id, { tagsJson: JSON.stringify([...tags]) });
       }
       return ok({ updated: rows.length });
     }
     case "playbook":
-      db.update(trades)
-        .set({ playbookId: body.playbookId ?? null })
-        .where(inArray(trades.key, body.keys))
-        .run();
+      for (const key of body.keys) {
+        await databases.updateDocument(DATABASE_ID, 'trades', key, { playbookId: body.playbookId ?? null });
+      }
       return ok({ updated: rows.length });
     case "delete": {
       const byAccount = new Map<string, string[]>();
@@ -51,7 +58,7 @@ export const POST = handler(async (request: Request) => {
         byAccount.set(row.accountId, [...(byAccount.get(row.accountId) ?? []), ...ids]);
       }
       for (const [accountId, executionIds] of byAccount) {
-        deleteExecutionsForTrades(accountId, executionIds);
+        await deleteExecutionsForTrades(accountId, executionIds);
       }
       return ok({ deleted: rows.length });
     }

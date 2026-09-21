@@ -1,6 +1,3 @@
-import { eq } from "drizzle-orm";
-import { db, settings } from "@/db";
-import { decryptJson, encryptJson } from "./crypto";
 import { EMPTY_DEFAULTS, type JournalDefaults } from "@/lib/journal-defaults";
 import {
   AI_DEFAULT_MODELS,
@@ -8,38 +5,56 @@ import {
   type AiProvider,
   type AiSettingsPayload,
 } from "@/lib/ai-settings";
+import { decryptJson, encryptJson } from "./crypto";
+import { createAdminClient } from "@/lib/appwrite";
 
-export const getJournalDefaults = (): JournalDefaults => {
+const DATABASE_ID = 'trade_journal';
+const COLLECTION_ID = 'settings';
+
+export const getJournalDefaults = async (): Promise<JournalDefaults> => {
   try {
-    return { ...EMPTY_DEFAULTS, ...JSON.parse(getSetting("journalDefaults") ?? "{}") };
+    return { ...EMPTY_DEFAULTS, ...JSON.parse((await getSetting("journalDefaults")) ?? "{}") };
   } catch {
     return EMPTY_DEFAULTS;
   }
 };
 
-export const getSetting = (key: string): string | null =>
-  db.select().from(settings).where(eq(settings.key, key)).get()?.value ?? null;
-
-export const setSetting = (key: string, value: string): void => {
-  db.insert(settings)
-    .values({ key, value })
-    .onConflictDoUpdate({ target: settings.key, set: { value } })
-    .run();
+export const getSetting = async (key: string): Promise<string | null> => {
+  const { databases } = createAdminClient();
+  try {
+    const doc = await databases.getDocument(DATABASE_ID, COLLECTION_ID, key);
+    return doc.value;
+  } catch {
+    return null;
+  }
 };
 
-export const deleteSetting = (key: string): void => {
-  db.delete(settings).where(eq(settings.key, key)).run();
+export const setSetting = async (key: string, value: string): Promise<void> => {
+  const { databases } = createAdminClient();
+  try {
+    await databases.updateDocument(DATABASE_ID, COLLECTION_ID, key, { value });
+  } catch (err: any) {
+    if (err.code === 404) {
+      await databases.createDocument(DATABASE_ID, COLLECTION_ID, key, { value });
+    }
+  }
 };
 
-/** Journal display timezone (IANA), default UTC. */
-export const getTimeZone = (): string => getSetting("timeZone") ?? "UTC";
+export const deleteSetting = async (key: string): Promise<void> => {
+  const { databases } = createAdminClient();
+  try {
+    await databases.deleteDocument(DATABASE_ID, COLLECTION_ID, key);
+  } catch (e) {
+    // Ignore
+  }
+};
 
-/** Preserve the legacy parsing default until a separate import zone is saved. */
-export const getImportTimeZone = (): string => getSetting("importTimeZone") ?? getTimeZone();
+export const getTimeZone = async (): Promise<string> => (await getSetting("timeZone")) ?? "UTC";
 
-/** Per-symbol contract multipliers for futures/options P&L. */
-export const getMultipliers = (): Record<string, number> => {
-  const raw = getSetting("multipliers");
+export const getImportTimeZone = async (): Promise<string> => (await getSetting("importTimeZone")) ?? (await getTimeZone());
+
+export const getMultipliers = async (): Promise<Record<string, number>> => {
+  const raw = await getSetting("multipliers");
   if (!raw) return {};
   try {
     return JSON.parse(raw) as Record<string, number>;
@@ -52,11 +67,10 @@ export const aiKeyEnvironment = (provider: AiProvider): string | null =>
   (provider === "openai" ? process.env.OPENAI_API_KEY : process.env.ANTHROPIC_API_KEY)?.trim() ||
   null;
 
-/** Provider keys are stored separately and encrypted like broker credentials. */
-export const getAiKey = (provider: AiProvider): string | null => {
+export const getAiKey = async (provider: AiProvider): Promise<string | null> => {
   const environment = aiKeyEnvironment(provider);
   if (environment) return environment;
-  const envelope = getSetting(`${provider}KeyEnc`);
+  const envelope = await getSetting(`${provider}KeyEnc`);
   if (!envelope) return null;
   try {
     const key = decryptJson<unknown>(envelope);
@@ -66,39 +80,47 @@ export const getAiKey = (provider: AiProvider): string | null => {
   }
 };
 
-export const setAiKey = (provider: AiProvider, key: string | null): void => {
-  if (key === null) deleteSetting(`${provider}KeyEnc`);
-  else setSetting(`${provider}KeyEnc`, encryptJson(key.trim()));
+export const setAiKey = async (provider: AiProvider, key: string | null): Promise<void> => {
+  if (key === null) await deleteSetting(`${provider}KeyEnc`);
+  else await setSetting(`${provider}KeyEnc`, encryptJson(key.trim()));
 };
 
-export const getAnthropicKey = (): string | null => getAiKey("anthropic");
-export const setAnthropicKey = (key: string | null): void => setAiKey("anthropic", key);
+export const getAnthropicKey = async (): Promise<string | null> => getAiKey("anthropic");
+export const setAnthropicKey = async (key: string | null): Promise<void> => setAiKey("anthropic", key);
 
-export const getAiProvider = (): AiProvider => {
-  const selected = getSetting("aiProvider");
+export const getAiProvider = async (): Promise<AiProvider> => {
+  const selected = await getSetting("aiProvider");
   if (isAiProvider(selected)) return selected;
-  // Preserve existing Anthropic setups; an OpenAI-only setup works without a UI visit.
-  return !getAiKey("anthropic") && getAiKey("openai") ? "openai" : "anthropic";
+  return !(await getAiKey("anthropic")) && (await getAiKey("openai")) ? "openai" : "anthropic";
 };
 
 export const aiModelSetting = (provider: AiProvider): string =>
   provider === "anthropic" ? "aiModel" : "openaiModel";
 
-export const getAiModel = (provider: AiProvider): string =>
-  getSetting(aiModelSetting(provider))?.trim() || AI_DEFAULT_MODELS[provider];
+export const getAiModel = async (provider: AiProvider): Promise<string> =>
+  (await getSetting(aiModelSetting(provider)))?.trim() || AI_DEFAULT_MODELS[provider];
 
-export const getAiSettings = (): AiSettingsPayload => {
-  const aiProvider = getAiProvider();
-  const connection = (provider: AiProvider) => ({
-    configured: Boolean(getAiKey(provider)),
-    source: aiKeyEnvironment(provider)
-      ? ("environment" as const)
-      : getAiKey(provider)
-        ? ("saved" as const)
-        : null,
-    model: getAiModel(provider),
-  });
-  const aiConnections = { anthropic: connection("anthropic"), openai: connection("openai") };
+export const getAiSettings = async (): Promise<AiSettingsPayload> => {
+  const aiProvider = await getAiProvider();
+  
+  const connection = async (provider: AiProvider) => {
+    const key = await getAiKey(provider);
+    return {
+      configured: Boolean(key),
+      source: aiKeyEnvironment(provider)
+        ? ("environment" as const)
+        : key
+          ? ("saved" as const)
+          : null,
+      model: await getAiModel(provider),
+    };
+  };
+
+  const anthropicConfig = await connection("anthropic");
+  const openaiConfig = await connection("openai");
+  
+  const aiConnections = { anthropic: anthropicConfig, openai: openaiConfig };
+  
   return {
     aiProvider,
     aiConfigured: aiConnections[aiProvider].configured,

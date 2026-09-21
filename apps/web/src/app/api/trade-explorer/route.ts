@@ -1,23 +1,26 @@
 import { readFilters } from "@luxalgo/journal-core";
-import { accounts, db } from "@/db";
 import { tradeExplorerPoints } from "@/lib/trade-explorer";
 import { handler, ok } from "@/server/api";
 import { getTimeZone } from "@/server/settings";
 import { queryTrades } from "@/server/trades-query";
-
 import { savedEstimates } from "@/server/market-data/estimates";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
 
-export const GET = handler((request: Request) => {
-  const { trades } = queryTrades(readFilters(new URL(request.url).searchParams));
-  const timeZone = getTimeZone();
+const DATABASE_ID = 'trade_journal';
+
+export const GET = handler(async (request: Request) => {
+  const { trades } = await queryTrades(readFilters(new URL(request.url).searchParams));
+  const timeZone = await getTimeZone();
+  
+  const { databases } = createAdminClient();
+  const accountsResponse = await databases.listDocuments(DATABASE_ID, 'accounts');
+  
   const currencies = new Map(
-    db
-      .select({ id: accounts.id, currency: accounts.currency })
-      .from(accounts)
-      .all()
-      .map((account) => [account.id, account.currency]),
+    accountsResponse.documents.map((account) => [account.$id, account.currency]),
   );
-  const estimates = savedEstimates(trades);
+  const estimates = await savedEstimates(trades);
+  
   return ok({
     points: tradeExplorerPoints(trades, timeZone).map((point) => ({
       ...point,

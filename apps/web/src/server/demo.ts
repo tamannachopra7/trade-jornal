@@ -1,13 +1,13 @@
-import { eq } from "drizzle-orm";
 import type { ImportedExecution } from "@luxalgo/journal-importers";
-import { accounts, db } from "@/db";
 import { insertExecutions } from "./executions";
 import { newId, nowIso } from "./ids";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
 
-/** Demo accounts are tagged by broker so they can be found and deleted. */
+const DATABASE_ID = 'trade_journal';
+
 export const DEMO_BROKER = "demo";
 
-/* Deterministic RNG: the demo journal looks the same on every install. */
 const rng = (seed: number) => {
   let s = seed;
   return () => {
@@ -25,11 +25,6 @@ const SYMBOLS = [
   { symbol: "SPY", price: 556, qtyMin: 40, qtyMax: 120 },
 ] as const;
 
-/**
- * ~90 days of plausible equity day trading ending today: 56% winners, winners
- * run further than losers, some scaled exits, two still-open positions.
- * Sessions are generated in UTC around US cash hours.
- */
 const generateExecutions = (): ImportedExecution[] => {
   const rnd = rng(42);
   const rows: ImportedExecution[] = [];
@@ -106,8 +101,6 @@ const generateExecutions = (): ImportedExecution[] => {
     }
   }
 
-  // A handful of crypto round trips: these chart on real candles (Vela's
-  // keyless Binance/Coinbase providers), so the demo shows that path too.
   const CRYPTO = [
     { symbol: "BTCUSDT", price: 96000, qty: () => Number((0.05 + rnd() * 0.3).toFixed(3)) },
     { symbol: "ETHUSDT", price: 4400, qty: () => Number((0.5 + rnd() * 3).toFixed(2)) },
@@ -143,7 +136,6 @@ const generateExecutions = (): ImportedExecution[] => {
     });
   }
 
-  // Two open positions so the dashboard's "Open positions" tab has content.
   const lastDay = new Date(today.getTime() - 86_400_000);
   rows.push({
     symbol: "NVDA",
@@ -170,30 +162,32 @@ export interface DemoResult {
   alreadyLoaded: boolean;
 }
 
-/** Idempotent: a second call returns the existing demo account untouched. */
-export const loadDemoData = (): DemoResult => {
-  const existing = db.select().from(accounts).where(eq(accounts.broker, DEMO_BROKER)).get();
+export const loadDemoData = async (): Promise<DemoResult> => {
+  const { databases } = createAdminClient();
+  let existing;
+  try {
+    const res = await databases.listDocuments(DATABASE_ID, 'accounts', [Query.equal('broker', DEMO_BROKER), Query.limit(1)]);
+    if (res.documents.length > 0) existing = res.documents[0] as any;
+  } catch {}
+
   if (existing) {
     if (existing.archivedAt)
-      db.update(accounts).set({ archivedAt: null }).where(eq(accounts.id, existing.id)).run();
-    return { accountId: existing.id, inserted: 0, alreadyLoaded: true };
+      await databases.updateDocument(DATABASE_ID, 'accounts', existing.$id, { archivedAt: null });
+    return { accountId: existing.$id, inserted: 0, alreadyLoaded: true };
   }
 
   const id = newId();
-  db.insert(accounts)
-    .values({
-      id,
-      name: "Demo data",
-      broker: DEMO_BROKER,
-      kind: "import",
-      currency: "USD",
-      initialBalance: 25000,
-      profitCalcMethod: "fifo",
-      credentialsEnc: null,
-      autoSync: false,
-      createdAt: nowIso(),
-    })
-    .run();
-  const { inserted } = insertExecutions(id, generateExecutions(), "import");
+  await databases.createDocument(DATABASE_ID, 'accounts', id, {
+    name: "Demo data",
+    broker: DEMO_BROKER,
+    kind: "import",
+    currency: "USD",
+    initialBalance: 25000,
+    profitCalcMethod: "fifo",
+    credentialsEnc: null,
+    autoSync: false,
+    createdAt: nowIso(),
+  });
+  const { inserted } = await insertExecutions(id, generateExecutions(), "import");
   return { accountId: id, inserted, alreadyLoaded: false };
 };

@@ -1,9 +1,11 @@
-import { eq } from "drizzle-orm";
-import { accounts, db, executions, trades } from "@/db";
 import { bad, handler, ok } from "@/server/api";
 import { nowIso } from "@/server/ids";
 import { rebuildAccount } from "@/server/rebuild";
 import { syncAccount } from "@/server/sync";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -15,42 +17,58 @@ interface ActionBody {
 
 export const POST = handler(async (request: Request, { params }: Params) => {
   const { id } = await params;
-  const account = db.select().from(accounts).where(eq(accounts.id, id)).get();
-  if (!account) return bad("Account not found", 404);
+  const { databases } = createAdminClient();
+
+  let account;
+  try {
+    account = await databases.getDocument(DATABASE_ID, 'accounts', id);
+  } catch {
+    return bad("Account not found", 404);
+  }
   const body = (await request.json()) as ActionBody;
 
   switch (body.action) {
     case "archive":
-      db.update(accounts).set({ archivedAt: nowIso() }).where(eq(accounts.id, id)).run();
+      await databases.updateDocument(DATABASE_ID, 'accounts', id, { archivedAt: nowIso() });
       return ok({ archived: true });
     case "unarchive":
-      db.update(accounts).set({ archivedAt: null }).where(eq(accounts.id, id)).run();
+      await databases.updateDocument(DATABASE_ID, 'accounts', id, { archivedAt: null });
       return ok({ archived: false });
-    case "clear":
-      db.transaction((tx) => {
-        tx.delete(trades).where(eq(trades.accountId, id)).run();
-        tx.delete(executions).where(eq(executions.accountId, id)).run();
-      });
+    case "clear": {
+      const getDocs = async (coll: string) => {
+        const res = await databases.listDocuments(DATABASE_ID, coll, [Query.equal('accountId', id), Query.limit(5000)]);
+        return res.documents;
+      };
+      const [t, e] = await Promise.all([getDocs('trades'), getDocs('executions')]);
+      for (const doc of t) await databases.deleteDocument(DATABASE_ID, 'trades', doc.$id);
+      for (const doc of e) await databases.deleteDocument(DATABASE_ID, 'executions', doc.$id);
       return ok({ cleared: true });
+    }
     case "sync":
       return ok({ sync: await syncAccount(id) });
     case "transfer": {
       if (!body.toAccountId) return bad("toAccountId is required");
       const destinationId = body.toAccountId;
-      const destination = db.select().from(accounts).where(eq(accounts.id, destinationId)).get();
-      if (!destination) return bad("Destination account not found", 404);
+      let destination;
+      try {
+        destination = await databases.getDocument(DATABASE_ID, 'accounts', destinationId);
+      } catch {
+        return bad("Destination account not found", 404);
+      }
 
-      // Remember annotations before the move; trade keys are account-prefixed,
-      // so after the rebuild they re-anchor under the destination's prefix.
-      const sourceTrades = db.select().from(trades).where(eq(trades.accountId, id)).all();
-      db.transaction((tx) => {
-        tx.update(executions)
-          .set({ accountId: destinationId })
-          .where(eq(executions.accountId, id))
-          .run();
-        tx.delete(trades).where(eq(trades.accountId, id)).run();
-      });
-      rebuildAccount(destinationId);
+      const tRes = await databases.listDocuments(DATABASE_ID, 'trades', [Query.equal('accountId', id), Query.limit(5000)]);
+      const sourceTrades = tRes.documents;
+      const eRes = await databases.listDocuments(DATABASE_ID, 'executions', [Query.equal('accountId', id), Query.limit(5000)]);
+      const sourceExecutions = eRes.documents;
+      
+      for (const doc of sourceExecutions) {
+        await databases.updateDocument(DATABASE_ID, 'executions', doc.$id, { accountId: destinationId });
+      }
+      for (const doc of sourceTrades) {
+        await databases.deleteDocument(DATABASE_ID, 'trades', doc.$id);
+      }
+      
+      await rebuildAccount(destinationId);
 
       for (const source of sourceTrades) {
         const hasAnnotations =
@@ -63,9 +81,10 @@ export const POST = handler(async (request: Request, { params }: Params) => {
           source.profitTarget !== null ||
           source.reviewedAt;
         if (!hasAnnotations) continue;
-        const newKey = destinationId + source.key.slice(id.length);
-        db.update(trades)
-          .set({
+        
+        const newKey = destinationId + source.$id.slice(id.length);
+        try {
+          await databases.updateDocument(DATABASE_ID, 'trades', newKey, {
             notes: source.notes,
             tagsJson: source.tagsJson,
             mistakesJson: source.mistakesJson,
@@ -74,9 +93,10 @@ export const POST = handler(async (request: Request, { params }: Params) => {
             stopLoss: source.stopLoss,
             profitTarget: source.profitTarget,
             reviewedAt: source.reviewedAt,
-          })
-          .where(eq(trades.key, newKey))
-          .run();
+          });
+        } catch (e) {
+          // might not exist if it wasn't rebuilt
+        }
       }
       return ok({ transferred: true });
     }

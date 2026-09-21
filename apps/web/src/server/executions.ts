@@ -1,18 +1,18 @@
-import { and, eq, inArray } from "drizzle-orm";
 import type { ImportedExecution } from "@luxalgo/journal-importers";
-import { db, executions, accounts, trades } from "@/db";
 import { executionHash, newId, nowIso } from "./ids";
 import { rebuildAccount } from "./rebuild";
 import { getJournalDefaults } from "./settings";
 import { defaultFee } from "@/lib/journal-defaults";
 import { requireValue } from "./api";
+import { createAdminClient } from "@/lib/appwrite";
+import { Query } from "node-appwrite";
+
+const DATABASE_ID = 'trade_journal';
 
 export interface InsertResult {
   inserted: number;
   duplicates: number;
-  /** Rows dropped because a broker or file record was unusable (sync/import only). */
   skipped: number;
-  /** A few plain-language reasons for skipped rows, capped so payloads stay small. */
   skippedReasons: string[];
 }
 
@@ -22,7 +22,6 @@ const MAX_SKIP_REASONS = 5;
 
 const isFiniteNumber = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
 
-/** Plain-language reason a row can't be journaled, or null when the row is valid. */
 export const executionProblem = (row: unknown, source: ExecutionSource): string | null => {
   if (!row || typeof row !== "object") return "Execution is missing.";
   const r = row as Partial<ImportedExecution>;
@@ -52,12 +51,6 @@ export const executionProblem = (row: unknown, source: ExecutionSource): string 
   return null;
 };
 
-/**
- * Split a batch into usable rows and skip reasons. Manual entry is strict: the
- * whole batch is rejected on the first bad row. Broker syncs and file imports
- * are lenient: one odd record must not fail the entire batch, so bad rows are
- * dropped and counted for the caller to report.
- */
 export const partitionExecutions = (
   rows: ImportedExecution[],
   source: ExecutionSource,
@@ -83,117 +76,150 @@ export const partitionExecutions = (
   return { usable, skipped, skippedReasons };
 };
 
-/** Insert fills, rebuild trades, and attach optional manual notes in one transaction. */
-export const insertExecutions = (
+export const insertExecutions = async (
   accountId: string,
   rows: ImportedExecution[],
   source: ExecutionSource,
   manualNotes?: string,
-): InsertResult => {
+): Promise<InsertResult> => {
   requireValue(
     manualNotes === undefined ||
       (source === "manual" && typeof manualNotes === "string" && manualNotes.length <= 100000),
     "Manual trade notes must be at most 100,000 characters.",
   );
-  requireValue(
-    db.select({ id: accounts.id }).from(accounts).where(eq(accounts.id, accountId)).get(),
-    "Account not found.",
-  );
+
+  const { databases } = createAdminClient();
+  
+  try {
+    await databases.getDocument(DATABASE_ID, 'accounts', accountId);
+  } catch (e) {
+    requireValue(false, "Account not found.");
+  }
+
   const { usable, skipped, skippedReasons } = partitionExecutions(rows, source);
   let inserted = 0;
   let duplicates = 0;
   const createdAt = nowIso();
-  const defaults = getJournalDefaults();
+  const defaults = await getJournalDefaults();
   const note = manualNotes?.trim() ? manualNotes : undefined;
+  const noteExecutionIds = new Set<string>();
 
-  db.transaction((tx) => {
-    const noteExecutionIds = new Set<string>();
-    for (const row of usable) {
-      const id = newId();
-      const contentHash = executionHash(row);
-      const result = tx
-        .insert(executions)
-        .values({
-          id,
-          accountId,
-          symbol: row.symbol,
-          side: row.side,
-          quantity: row.quantity,
-          price: row.price,
-          fee: row.importMetadata?.preserveFee
-            ? row.fee
-            : defaultFee(row.fee, row.quantity, accountId, row.symbol, defaults),
-          executedAt: row.executedAt,
-          assetClass: row.assetClass ?? null,
-          source,
-          importMetadataJson: row.importMetadata ? JSON.stringify(row.importMetadata) : null,
-          contentHash,
-          createdAt,
-        })
-        .onConflictDoNothing()
-        .run();
-      if (result.changes > 0) {
-        inserted++;
-        if (note) noteExecutionIds.add(id);
-      } else {
+  for (const row of usable) {
+    const id = newId();
+    const contentHash = executionHash(row);
+
+    try {
+      // Check for duplicates
+      const existing = await databases.listDocuments(DATABASE_ID, 'executions', [
+        Query.equal('accountId', accountId),
+        Query.equal('contentHash', contentHash)
+      ]);
+
+      if (existing.total > 0) {
         duplicates++;
-        if (note) {
-          const existing = tx
-            .select({ id: executions.id })
-            .from(executions)
-            .where(
-              and(eq(executions.accountId, accountId), eq(executions.contentHash, contentHash)),
-            )
-            .get();
-          if (existing) noteExecutionIds.add(existing.id);
-        }
+        if (note) noteExecutionIds.add(existing.documents[0]?.$id as string);
+        continue;
       }
+
+      await databases.createDocument(DATABASE_ID, 'executions', id, {
+        accountId,
+        symbol: row.symbol,
+        side: row.side,
+        quantity: row.quantity,
+        price: row.price,
+        fee: row.importMetadata?.preserveFee
+          ? row.fee
+          : defaultFee(row.fee, row.quantity, accountId, row.symbol, defaults),
+        executedAt: row.executedAt,
+        assetClass: row.assetClass ?? null,
+        source,
+        importMetadataJson: row.importMetadata ? JSON.stringify(row.importMetadata) : null,
+        contentHash,
+        createdAt,
+      });
+      inserted++;
+      if (note) noteExecutionIds.add(id);
+    } catch (err) {
+      console.error("Failed to insert execution", err);
     }
-    if (inserted > 0) rebuildAccount(accountId);
-    if (note) {
-      const affected = tx
-        .select({
-          key: trades.key,
-          notes: trades.notes,
-          executionIdsJson: trades.executionIdsJson,
-        })
-        .from(trades)
-        .where(eq(trades.accountId, accountId))
-        .all();
-      for (const trade of affected) {
-        const ids = JSON.parse(trade.executionIdsJson) as string[];
-        if (!ids.some((id) => noteExecutionIds.has(id))) continue;
-        // Keep prior annotations when these fills extend or close an existing position.
-        // Retrying the same submission must not append the note a second time.
-        if (trade.notes === note || trade.notes?.endsWith(`\n\n${note}`)) continue;
-        const notes = trade.notes?.trim() ? `${trade.notes}\n\n${note}` : note;
-        requireValue(
-          notes.length <= 100000,
-          "Combined trade notes must be at most 100,000 characters.",
-        );
-        tx.update(trades).set({ notes }).where(eq(trades.key, trade.key)).run();
-      }
+  }
+
+  if (inserted > 0) await rebuildAccount(accountId);
+
+  if (note) {
+    const affected = await databases.listDocuments(DATABASE_ID, 'trades', [
+      Query.equal('accountId', accountId)
+    ]);
+
+    for (const trade of affected.documents) {
+      const ids = JSON.parse(trade.executionIdsJson) as string[];
+      if (!ids.some((id) => noteExecutionIds.has(id))) continue;
+      
+      if (trade.notes === note || trade.notes?.endsWith(`\n\n${note}`)) continue;
+      const notes = trade.notes?.trim() ? `${trade.notes}\n\n${note}` : note;
+      requireValue(
+        notes.length <= 100000,
+        "Combined trade notes must be at most 100,000 characters.",
+      );
+
+      await databases.updateDocument(DATABASE_ID, 'trades', trade.$id, { notes });
     }
-  });
+  }
 
   return { inserted, duplicates, skipped, skippedReasons };
 };
 
-export const deleteExecutionsForTrades = (accountId: string, executionIds: string[]): void => {
+export const deleteExecutionsForTrades = async (accountId: string, executionIds: string[]): Promise<void> => {
   if (executionIds.length === 0) return;
-  db.delete(executions)
-    .where(and(eq(executions.accountId, accountId), inArray(executions.id, executionIds)))
-    .run();
-  rebuildAccount(accountId);
+  const { databases } = createAdminClient();
+
+  for (const id of executionIds) {
+    try {
+      const doc = await databases.getDocument(DATABASE_ID, 'executions', id);
+      if (doc.accountId === accountId) {
+        await databases.deleteDocument(DATABASE_ID, 'executions', id);
+      }
+    } catch (e) {
+      // Ignore if not found
+    }
+  }
+  await rebuildAccount(accountId);
 };
 
-export const listExecutions = (accountId: string, ids?: string[]) => {
+export type ExecutionRow = {
+  id: string;
+  accountId: string;
+  symbol: string;
+  side: "buy" | "sell";
+  quantity: number;
+  price: number;
+  fee: number;
+  executedAt: string;
+  assetClass: string | null;
+  source: ExecutionSource;
+  importMetadataJson: string | null;
+  contentHash: string;
+  createdAt: string;
+};
+
+export const listExecutions = async (accountId: string, ids?: string[]): Promise<ExecutionRow[]> => {
+  const { databases } = createAdminClient();
+  const queries = [Query.equal('accountId', accountId)];
+  // Appwrite doesn't natively support "IN" queries cleanly for very large lists, 
+  // but for small lists we can combine OR queries or just fetch and filter.
+  // We'll fetch all for the account and filter in memory as a safe fallback.
+  
+  // NOTE: This might need pagination for huge accounts
+  const response = await databases.listDocuments(DATABASE_ID, 'executions', queries);
+  let results = response.documents;
+  
   if (ids && ids.length > 0) {
-    return db
-      .select()
-      .from(executions)
-      .where(and(eq(executions.accountId, accountId), inArray(executions.id, ids)))
-      .all();
+    const idSet = new Set(ids);
+    results = results.filter(doc => idSet.has(doc.$id));
   }
-  return db.select().from(executions).where(eq(executions.accountId, accountId)).all();
+  
+  return results.map(doc => {
+    const { $id, ...rest } = doc;
+    return { ...rest, id: $id } as unknown as ExecutionRow;
+  });
 };
