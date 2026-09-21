@@ -219,6 +219,22 @@ const collections = [
             { key: 'reason', type: 'string', required: true, size: 1000 },
             { key: 'createdAt', type: 'string', required: true, size: 100 }
         ]
+    },
+    {
+        id: 'marketCsvDatasets',
+        name: 'Market CSV Datasets',
+        attributes: [
+            { key: 'name', type: 'string', required: true, size: 255 },
+            { key: 'symbol', type: 'string', required: true, size: 100 },
+            { key: 'resolution', type: 'string', required: true, size: 50 },
+            { key: 'currency', type: 'string', required: true, size: 20 },
+            { key: 'priceBasis', type: 'string', required: true, size: 50 },
+            { key: 'importedAt', type: 'string', required: true, size: 100 },
+            { key: 'barsJson', type: 'string', required: true, size: 1000000 },
+            { key: 'barCount', type: 'integer', required: true },
+            { key: 'firstTime', type: 'float', required: true },
+            { key: 'lastTime', type: 'float', required: true }
+        ]
     }
 ];
 
