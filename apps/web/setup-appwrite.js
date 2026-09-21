@@ -17,11 +17,11 @@ const collections = [
             { key: 'name', type: 'string', required: true, size: 255 },
             { key: 'broker', type: 'string', required: false, size: 255, default: '' },
             { key: 'kind', type: 'string', required: true, size: 50 },
-            { key: 'currency', type: 'string', required: true, size: 10, default: 'USD' },
-            { key: 'initialBalance', type: 'float', required: true, default: 0 },
-            { key: 'profitCalcMethod', type: 'string', required: true, size: 20, default: 'fifo' },
+            { key: 'currency', type: 'string', required: false, size: 10, default: 'USD' },
+            { key: 'initialBalance', type: 'float', required: false, default: 0 },
+            { key: 'profitCalcMethod', type: 'string', required: false, size: 20, default: 'fifo' },
             { key: 'credentialsEnc', type: 'string', required: false, size: 1000 },
-            { key: 'autoSync', type: 'boolean', required: true, default: false },
+            { key: 'autoSync', type: 'boolean', required: false, default: false },
             { key: 'lastSyncAt', type: 'string', required: false, size: 100 },
             { key: 'snapshotJson', type: 'string', required: false, size: 10000 },
             { key: 'archivedAt', type: 'string', required: false, size: 100 },
@@ -37,7 +37,7 @@ const collections = [
             { key: 'side', type: 'string', required: true, size: 10 },
             { key: 'quantity', type: 'float', required: true },
             { key: 'price', type: 'float', required: true },
-            { key: 'fee', type: 'float', required: true, default: 0 },
+            { key: 'fee', type: 'float', required: false, default: 0 },
             { key: 'executedAt', type: 'string', required: true, size: 100 },
             { key: 'assetClass', type: 'string', required: false, size: 50 },
             { key: 'source', type: 'string', required: true, size: 50 },
@@ -256,31 +256,32 @@ async function setup() {
             console.log(`Creating collection ${col.id}...`);
             await databases.createCollection(DATABASE_ID, col.id, col.name);
             console.log(`Created collection ${col.id}. Adding attributes...`);
-            
-            for (const attr of col.attributes) {
-                try {
-                    if (attr.type === 'string') {
-                        await databases.createStringAttribute(DATABASE_ID, col.id, attr.key, attr.size || 255, attr.required, attr.default);
-                    } else if (attr.type === 'float') {
-                        await databases.createFloatAttribute(DATABASE_ID, col.id, attr.key, attr.required, undefined, undefined, attr.default);
-                    } else if (attr.type === 'integer') {
-                        await databases.createIntegerAttribute(DATABASE_ID, col.id, attr.key, attr.required, undefined, undefined, attr.default);
-                    } else if (attr.type === 'boolean') {
-                        await databases.createBooleanAttribute(DATABASE_ID, col.id, attr.key, attr.required, attr.default);
-                    }
-                } catch (e) {
-                    if (e.code === 409) {
-                        console.log(`Attribute ${attr.key} already exists.`);
-                    } else {
-                        console.error(`Error creating attribute ${attr.key}:`, e.message);
-                    }
-                }
-            }
         } catch (err) {
             if (err.code === 409) {
-                console.log(`Collection ${col.id} already exists.`);
+                console.log(`Collection ${col.id} already exists. Updating attributes...`);
             } else {
                 console.error(`Error creating collection ${col.id}:`, err.message);
+                continue;
+            }
+        }
+        
+        for (const attr of col.attributes) {
+            try {
+                if (attr.type === 'string') {
+                    await databases.createStringAttribute(DATABASE_ID, col.id, attr.key, attr.size || 255, attr.required, attr.default);
+                } else if (attr.type === 'float') {
+                    await databases.createFloatAttribute(DATABASE_ID, col.id, attr.key, attr.required, undefined, undefined, attr.default);
+                } else if (attr.type === 'integer') {
+                    await databases.createIntegerAttribute(DATABASE_ID, col.id, attr.key, attr.required, undefined, undefined, attr.default);
+                } else if (attr.type === 'boolean') {
+                    await databases.createBooleanAttribute(DATABASE_ID, col.id, attr.key, attr.required, attr.default);
+                }
+            } catch (e) {
+                if (e.code === 409) {
+                    // console.log(`Attribute ${attr.key} already exists.`);
+                } else {
+                    console.error(`Error creating attribute ${attr.key} on ${col.id}:`, e.message);
+                }
             }
         }
     }
