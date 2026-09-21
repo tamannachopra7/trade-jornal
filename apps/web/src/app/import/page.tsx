@@ -329,7 +329,7 @@ function FileImport() {
               </Button>
             </div>
           )}
-          {preview?.needsMapping && preview.headers && (
+          {(preview?.needsMapping || mappingApplied) && preview?.headers && (
             <div className="space-y-2 rounded-md border p-3">
               <p className="text-sm">
                 Format not recognized — map your columns (nothing is guessed silently):
@@ -352,7 +352,7 @@ function FileImport() {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="none">—</SelectItem>
-                        {preview.headers!.map((header) => (
+                        {preview?.headers?.map((header) => (
                           <SelectItem key={header} value={header}>
                             {header}
                           </SelectItem>

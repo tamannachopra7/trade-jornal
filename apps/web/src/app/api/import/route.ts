@@ -53,6 +53,7 @@ export const POST = handler(async (request: Request) => {
       detected: parsed.format,
       timeZone,
       needsMapping: false,
+      headers: readHeaders(body.content),
       executions: parsed.executions.slice(0, 50),
       totals: {
         executions: parsed.executions.length,
